@@ -1,100 +1,135 @@
 const express = require("express");
-const http = require("http");
-const cors = require("cors"); // Importa o pacote CORS
-const { Server } = require("socket.io");
+const cors = require("cors");
 
-// Configurando o servidor express
 const app = express();
-
-// Configuração de CORS para Express
-app.use(
-  cors({
-    origin: "*", // Substitua pela URL do seu front-end
-    methods: ["GET", "POST"],
-    allowedHeaders: ["my-custom-header"],
-    credentials: true,
-  })
-);
-
-const server = http.createServer(app);
-
-// Configurando o Socket.io com CORS
-const io = new Server(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"],
-    allowedHeaders: ["my-custom-header"],
-    credentials: true,
-  },
-  pingInterval: 25000, // Intervalo de ping a cada 25 segundos
-  pingTimeout: 50000, // Desconecta se não receber pong em 50 segundos
-  transports: ["websocket", "polling"], // Ativa WebSocket e polling como fallback
-});
+app.use(cors());
+app.use(express.json());
 
 let players = [];
-let isRevealed = false; // Estado global que controla se as cartas estão reveladas
+let isRevealed = false;
 
-// Função para log detalhado de conexões e desconexões
-io.use((socket, next) => {
-  console.log("Nova conexão:", socket.id); // Log de novas conexões
-  next();
+const INACTIVITY_LIMIT = 600000;
+
+// Função para atualizar o lastActivityTime de um jogador
+function updatePlayerActivity(id) {
+  players = players.map((player) =>
+    player.id === id ? { ...player, lastActivityTime: Date.now() } : player
+  );
+}
+
+// Função para remover jogadores inativos
+function removeInactivePlayers() {
+  const now = Date.now();
+  players = players.filter(
+    (player) => now - player.lastActivityTime < INACTIVITY_LIMIT
+  );
+}
+
+// Intervalo que executa a remoção de inativos a cada 30 segundos
+setInterval(removeInactivePlayers, 30000);
+
+// Posições disponíveis para os jogadores
+const availablePositions = [
+  { top: "7rem", left: "37rem" },
+  { top: "7rem", left: "65rem" },
+  { top: "7rem", left: "25rem" },
+  { top: "7rem", left: "78rem" },
+  { top: "10rem", left: "15rem" },
+  { top: "10rem", left: "90rem" },
+  { top: "15rem", left: "7rem" },
+  { top: "15rem", left: "98rem" },
+  { top: "20rem", left: "3rem" },
+  { top: "20rem", left: "100rem" },
+  { top: "25rem", left: "7rem" },
+  { top: "25rem", left: "98rem" },
+];
+
+// Obter lista de jogadores
+app.get("/players", (req, res) => {
+  res.json(players);
 });
 
-io.on("connection", (socket) => {
-  console.log(`Usuário conectado: ${socket.id}`);
-
-  // Envia a lista completa de jogadores ao novo cliente
-  socket.emit("currentPlayers", players);
-
-  // Recebe a informação quando um jogador entra
-  socket.on("joinGame", (player) => {
-    player.socketId = socket.id; // Salva o socketId do jogador
-    players.push(player);
-    io.emit("playerJoined", player);
-  });
-
-  // Recebe a seleção de uma carta por um jogador
-  socket.on("selectCard", (updatedPlayer) => {
-    players = players.map((player) =>
-      player.id === updatedPlayer.id ? updatedPlayer : player
-    );
-    io.emit("cardSelected", updatedPlayer);
-  });
-
-  // Recebe o comando para revelar as cartas
-  socket.on("revealCards", () => {
-    isRevealed = true; // Altera o estado global de revelação
-    io.emit("revealCards", true); // Notifica todos os clientes para revelar as cartas
-  });
-
-  // Evento de reset dos jogadores (resetPlayers)
-  socket.on("resetPlayers", (resetPlayers) => {
-    players = resetPlayers; // Atualiza a lista de jogadores no servidor
-    io.emit("currentPlayers", players); // Envia a lista atualizada para todos os clientes
-  });
-
-  // Lida com a desconexão do jogador e o remove da lista
-  socket.on("disconnect", () => {
-    console.log(`Usuário desconectado: ${socket.id}`);
-    players = players.filter((player) => player.socketId !== socket.id); // Remove o jogador da lista
-    io.emit("playerDisconnected", socket.id); // Notifica todos os clientes sobre a desconexão
-  });
-
-  // Evento de novo jogo - reinicia o jogo para todos os jogadores
-  socket.on("newGame", () => {
-    players = []; // Reseta os jogadores no servidor
-    isRevealed = false; // Reseta o estado de revelação
-    io.emit("newGame"); // Notifica todos os clientes para reiniciar o jogo
-  });
+// Adicionar um jogador
+app.post("/join", (req, res) => {
+  const { name, role } = req.body;
+  const positionIndex = players.length % availablePositions.length;
+  const newPlayer = {
+    id: Date.now(),
+    name,
+    role,
+    selectedCard: null,
+    hasVoted: false,
+    isRevealed: false,
+    position: availablePositions[positionIndex],
+    lastActivityTime: Date.now(),
+  };
+  players.push(newPlayer);
+  res.status(201).json(newPlayer);
 });
 
-// Servidor ouvindo na porta 443
+// Selecionar uma carta
+app.post("/select-card", (req, res) => {
+  const { id, selectedCard } = req.body;
+  let found = false;
+  players = players.map((player) => {
+    if (player.id === id) {
+      found = true;
+      return {
+        ...player,
+        selectedCard,
+        hasVoted: true,
+        lastActivityTime: Date.now(),
+      };
+    }
+    return player;
+  });
+  if (found) res.status(200).send({ message: "Carta atualizada" });
+  else res.status(404).send({ message: "Jogador não encontrado" });
+});
+
+// Revelar cartas
+app.post("/reveal-cards", (req, res) => {
+  isRevealed = true;
+  players = players.map((player) => ({
+    ...player,
+    isRevealed: true,
+    lastActivityTime: Date.now(),
+  }));
+  res.status(200).send();
+});
+
+// Resetar o jogo
+app.post("/new-game", (req, res) => {
+  isRevealed = false;
+  players = players.map((player) => ({
+    ...player,
+    selectedCard: null,
+    hasVoted: false,
+    isRevealed: false,
+    lastActivityTime: Date.now(),
+  }));
+  res.status(200).send();
+});
+
+// Remover um jogador manualmente
+app.post("/leave", (req, res) => {
+  const { id } = req.body;
+  players = players.filter((player) => player.id !== id);
+  res.status(200).send({ message: "Jogador removido" });
+});
+
+app.post("/close-reveal", (req, res) => {
+  isRevealed = false;
+  players = players.map((player) => ({
+    ...player,
+    isRevealed: false,
+  }));
+  res.status(200).send({ message: "Reveal fechado para todos" });
+});
+
+// Caso queira atualizar atividade em outras ações, basta chamar updatePlayerActivity(id)
+
 const PORT = process.env.PORT || 443;
-server.listen(PORT, () => {
-  console.log(`Servidor rodando na porta ${PORT}`);
-});
-
-// Rota padrão GET
-app.get("/", (req, res) => {
-  res.send("Bem-vindo ao servidor com Socket.io!");
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
